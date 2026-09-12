@@ -82,6 +82,9 @@ jobs:
     name: "03. Container Build, Scan & ECR Push"
     needs: [cnapp-source-scan]
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
     outputs:
       image_tag: ${{ steps.set-tag.outputs.image_tag }}
       ecr_registry: ${{ steps.login-ecr.outputs.registry }}
@@ -144,6 +147,9 @@ jobs:
     name: "04. Deploy Directly to EKS Cluster"
     needs: [build-and-image-scan]
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
     steps:
       - name: Checkout Source Code
         uses: actions/checkout@v4

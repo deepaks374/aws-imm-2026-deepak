@@ -39,7 +39,7 @@ variable "cluster_name" {
 variable "github_repository" {
   type        = string
   description = "GitHub repository in format owner/repo for GitHub Actions OIDC"
-  default     = "*:*"
+  default     = "deepaks374/aws-imm-2026-deepak:*"
 }
 
 data "aws_availability_zones" "available" {
