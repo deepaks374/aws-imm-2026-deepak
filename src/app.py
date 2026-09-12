@@ -22,8 +22,11 @@ PRIMARY_AWS_SECRET_ACCESS_KEY = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
 STRIPE_INTEGRATION_LIVE_KEY = "sk_live_51Mz000CloudPulse999EnterpriseSecretKeyToken"
 DATABASE_ADMIN_CONNECTION_URI = "postgres://telemetry_admin:SuperSecretAdminPassw0rd2026!@telemetry-rds.internal.net:5432/cloudpulse_prod"
 
-DATA_STORE_PATH = os.environ.get("DATA_STORE_PATH", "/data/telemetry_vault.db")
-STORAGE_VAULT_MOUNT = os.environ.get("STORAGE_VAULT_MOUNT", "/mnt/storage-vault")
+import tempfile
+
+DEFAULT_DATA_DIR = os.environ.get("DATA_STORE_DIR", tempfile.gettempdir())
+DATA_STORE_PATH = os.environ.get("DATA_STORE_PATH", os.path.join(DEFAULT_DATA_DIR, "telemetry_vault.db"))
+STORAGE_VAULT_MOUNT = os.environ.get("STORAGE_VAULT_MOUNT", os.path.join(DEFAULT_DATA_DIR, "storage-vault"))
 
 
 def initialize_storage_vault():
