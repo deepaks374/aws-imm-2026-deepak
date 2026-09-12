@@ -201,12 +201,24 @@ jobs:
           echo "[*] Verifying cluster reachability and credentials..."
           kubectl cluster-info
 
+      - name: Log in to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
       - name: Prepare Dynamic Kubernetes Manifests with ECR Image
         env:
           FULL_IMAGE: ${{ needs.build-and-image-scan.outputs.full_image }}
+          ECR_REGISTRY: ${{ needs.build-and-image-scan.outputs.ecr_registry }}
+          IMAGE_TAG: ${{ needs.build-and-image-scan.outputs.image_tag }}
         run: |
-          echo "[*] Injecting target ECR image into deployment manifest: ${FULL_IMAGE}"
-          sed -i "s|image: REPLACED_BY_CI_CD_PIPELINE|image: ${FULL_IMAGE}|g" k8s/deployment.yaml
+          TARGET_IMAGE="${FULL_IMAGE}"
+          if [ -z "${TARGET_IMAGE}" ]; then
+            REG="${ECR_REGISTRY:-${{ steps.login-ecr.outputs.registry }}}"
+            TAG="${IMAGE_TAG:-${{ github.sha }}}"
+            TARGET_IMAGE="${REG}/${{ env.ECR_REPOSITORY }}:${TAG}"
+          fi
+          echo "[*] Injecting target ECR image into deployment manifest: ${TARGET_IMAGE}"
+          sed -i "s|image: REPLACED_BY_CI_CD_PIPELINE|image: ${TARGET_IMAGE}|g" k8s/deployment.yaml
           cat k8s/deployment.yaml | grep -E "image:|name:"
 
       - name: Apply Kubernetes Manifests to EKS Cluster
