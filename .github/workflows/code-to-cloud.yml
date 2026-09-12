@@ -17,6 +17,9 @@ env:
   ECR_REPOSITORY: cloudpulse-telemetry-engine
   EKS_CLUSTER_NAME: cloudpulse-cnapp-eks
   DEPLOYMENT_NAMESPACE: cloudpulse-core
+  CORTEX_API_KEY: ${{ secrets.CORTEX_API_KEY }}
+  CORTEX_API_KEY_ID: ${{ secrets.CORTEX_API_KEY_ID }}
+  CORTEX_API_URL: https://api-dsharma1.xdr.in.paloaltonetworks.com
 
 jobs:
   # ============================================================================
@@ -47,32 +50,53 @@ jobs:
           pytest test_app.py -v
 
   # ============================================================================
-  # STAGE 2: Source Code Security (SAST, Secrets, IaC Scanning)
-  # Identifies hardcoded keys, command injection, and IaC/K8s misconfigurations
+  # STAGE 2: Palo Alto Networks Cortex CLI Code Scan & SAST
+  # Downloads the official unified cortexcli binary and executes SAST/Secrets/IaC scan
   # ============================================================================
-  cnapp-source-scan:
-    name: "02. CNAPP Source & IaC Security Scan"
+  cortex-code-scan:
+    name: "02. Cortex CLI Code Scan"
     needs: [test-and-lint]
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout Source Code
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: "Cortex SAST & Secret Scanner (Trivy Filesystem Mode)"
-        uses: aquasecurity/trivy-action@master
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
         with:
-          scan-type: 'fs'
-          scan-ref: '.'
-          severity: 'CRITICAL,HIGH,MEDIUM'
-          exit-code: '0' # Non-blocking to allow full demonstration
-          format: 'table'
+          node-version: 22
 
-      - name: "Cortex IaC Posture Scanner (Checkov IaC & Manifests)"
-        uses: bridgecrewio/checkov-action@master
-        with:
-          framework: terraform,kubernetes
-          directory: '.'
-          soft_fail: true # Highlights misconfigurations in PR
+      - name: Verify Node.js Version
+        run: node -v
+
+      - name: Download cortexcli
+        run: |
+          set -x
+          crtx_resp=$(curl "${CORTEX_API_URL}/public_api/v1/unified-cli/releases/download-link?os=linux&architecture=amd64" \
+            -H "x-xdr-auth-id: ${CORTEX_API_KEY_ID}" \
+            -H "Authorization: ${CORTEX_API_KEY}")
+          crtx_url=$(echo $crtx_resp | jq -r ".signed_url")
+          if [ -z "$crtx_url" ] || [ "$crtx_url" = "null" ]; then
+            echo "[-] Error: Failed to obtain signed URL for cortexcli download. Check CORTEX_API_KEY and CORTEX_API_KEY_ID."
+            echo "Response: $crtx_resp"
+            exit 1
+          fi
+          curl -s -L -o cortexcli "$crtx_url"
+          chmod +x cortexcli
+          ./cortexcli --version
+
+      - name: Run Cortex CLI Code Scan
+        run: |
+          ./cortexcli \
+            --api-base-url "${CORTEX_API_URL}" \
+            --api-key "${CORTEX_API_KEY}" \
+            --api-key-id "${CORTEX_API_KEY_ID}" \
+            code scan \
+            --directory "${{ github.workspace }}" \
+            --repo-id "${{ github.repository }}" \
+            --branch "${{ github.ref_name }}" \
+            --source "GITHUB_ACTIONS" \
+            --repo-url "${{ github.server_url }}/${{ github.repository }}"
 
   # ============================================================================
   # STAGE 3: Container Build, Image Scanning, & Artifact Registry Push
@@ -80,7 +104,7 @@ jobs:
   # ============================================================================
   build-and-image-scan:
     name: "03. Container Build, Scan & ECR Push"
-    needs: [cnapp-source-scan]
+    needs: [cortex-code-scan]
     runs-on: ubuntu-latest
     permissions:
       id-token: write
@@ -167,8 +191,13 @@ jobs:
 
       - name: Connect to EKS Cluster
         run: |
+          echo "[*] Verifying assumed AWS identity in GitHub Actions..."
+          aws sts get-caller-identity
+
           echo "[*] Updating kubeconfig for EKS cluster ${{ env.EKS_CLUSTER_NAME }} in ${{ env.AWS_REGION }}..."
           aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name ${{ env.EKS_CLUSTER_NAME }}
+
+          echo "[*] Verifying cluster reachability and credentials..."
           kubectl cluster-info
 
       - name: Prepare Dynamic Kubernetes Manifests with ECR Image

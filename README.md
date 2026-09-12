@@ -67,9 +67,10 @@ aws eks --region ap-south-1 update-kubeconfig --name cloudpulse-cnapp-eks
 The CI/CD pipeline in [`.github/workflows/code-to-cloud.yml`](final-code/.github/workflows/code-to-cloud.yml:1) automatically builds the container image from source, scans the image layers, pushes it to your Amazon ECR repository, and directly applies the Kubernetes manifests to the Amazon EKS cluster via `kubectl`.
 
 #### Prerequisites for GitHub Actions:
-1. Copy the `github_actions_role_arn` output from Terraform (Step 1).
-2. In your GitHub repository, navigate to **Settings > Secrets and variables > Actions**.
-3. Add a repository secret named **`AWS_DEPLOY_ROLE_ARN`** with the role ARN value (e.g., `arn:aws:iam::<ACCOUNT_ID>:role/cloudpulse-cnapp-eks-github-deployer-role`).
+In your GitHub repository, navigate to **Settings > Secrets and variables > Actions**, and configure the following secrets:
+1. **`AWS_DEPLOY_ROLE_ARN`**: The IAM Role ARN output from Terraform (Step 1).
+2. **`CORTEX_API_KEY`**: Your Palo Alto Networks Cortex API Key token.
+3. **`CORTEX_API_KEY_ID`**: Your Palo Alto Networks Cortex API Key ID.
 
 #### Triggering the Pipeline:
 Push code changes to the `main` branch (or run via GitHub Actions **Run workflow** dispatch):
