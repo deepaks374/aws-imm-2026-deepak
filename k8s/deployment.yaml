@@ -1,0 +1,89 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cloudpulse-telemetry-engine
+  namespace: cloudpulse-core
+  labels:
+    app.kubernetes.io/name: cloudpulse-telemetry-engine
+    app.kubernetes.io/part-of: cloudpulse-suite
+    tier: production-api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: cloudpulse-telemetry-engine
+  template:
+    metadata:
+      labels:
+        app: cloudpulse-telemetry-engine
+        tier: production-api
+    spec:
+      # ========================================================================
+      # CIEM & Misconfiguration Vector:
+      # Insecure ServiceAccount token auto-mounting enabled with broad cluster permissions
+      # Detected by: Cortex CIEM & Kubernetes Security Posture Management (KSPM)
+      # ========================================================================
+      automountServiceAccountToken: true
+      serviceAccountName: cloudpulse-privileged-operator
+
+      # Insecure Container Security Context / Misconfiguration Vectors:
+      # 1. hostPID: true - Pod shares host process namespace
+      # 2. hostNetwork: false
+      hostPID: true
+
+      containers:
+        - name: telemetry-engine
+          image: REPLACED_BY_CI_CD_PIPELINE
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8080
+              name: http
+
+          env:
+            - name: APP_ENV
+              value: "production"
+            - name: S3_DATA_VAULT_BUCKET
+              value: "cloudpulse-restricted-data-vault"
+            - name: DATA_STORE_PATH
+              value: "/data/telemetry_vault.db"
+            - name: STORAGE_VAULT_MOUNT
+              value: "/mnt/storage-vault"
+
+          # ====================================================================
+          # K8s Security Misconfiguration Vector:
+          # - privileged: true (Allows raw device access, container escape via nsenter)
+          # - allowPrivilegeEscalation: true
+          # - runAsUser: 0 (root)
+          # - readOnlyRootFilesystem: false
+          # - capabilities ADD: SYS_ADMIN, NET_ADMIN
+          # - Missing resource requests and limits (DoS susceptibility)
+          # Detected by: Cortex KSPM / Prisma Cloud Admission & Runtime Control
+          # ====================================================================
+          securityContext:
+            privileged: true
+            allowPrivilegeEscalation: true
+            runAsUser: 0
+            readOnlyRootFilesystem: false
+            capabilities:
+              add:
+                - SYS_ADMIN
+                - NET_ADMIN
+                - SYS_PTRACE
+
+          volumeMounts:
+            # Misconfiguration & Host Escape Vector:
+            # Insecure hostPath mount to the underlying worker node root filesystem
+            - name: host-root-filesystem
+              mountPath: /host-node-root
+              readOnly: false
+            # DSPM Vector: Persistent Volume / storage mount containing sensitive PII & billing data
+            - name: synthetic-dspm-vault
+              mountPath: /mnt/storage-vault
+
+      volumes:
+        - name: host-root-filesystem
+          hostPath:
+            path: /
+            type: Directory
+        - name: synthetic-dspm-vault
+          emptyDir: {}

@@ -1,0 +1,100 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: cloudpulse-core
+  labels:
+    name: cloudpulse-core
+    environment: production
+    security-zone: backend-ingress
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cloudpulse-privileged-operator
+  namespace: cloudpulse-core
+---
+# ==============================================================================
+# CIEM Vector: Overprivileged ClusterRoleBinding
+# Grants the application ServiceAccount full cluster-admin rights across the cluster.
+# Detected by: Cortex CIEM & KSPM RBAC Analyzer.
+# ==============================================================================
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: cloudpulse-operator-cluster-admin-binding
+subjects:
+  - kind: ServiceAccount
+    name: cloudpulse-privileged-operator
+    namespace: cloudpulse-core
+roleRef:
+  kind: ClusterRole
+  name: cluster-admin
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cloudpulse-telemetry-service
+  namespace: cloudpulse-core
+  labels:
+    app: cloudpulse-telemetry-engine
+    tier: production-api
+spec:
+  type: ClusterIP
+  ports:
+    - port: 8080
+      targetPort: 8080
+      protocol: TCP
+      name: http
+  selector:
+    app: cloudpulse-telemetry-engine
+---
+# ==============================================================================
+# Target Internal Service for Lateral Movement Demonstration
+# Simulates an internal transaction ledger database service in a separate namespace
+# ==============================================================================
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: cloudpulse-vault
+  labels:
+    name: cloudpulse-vault
+    environment: restricted-pci
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ledger-backend-vault
+  namespace: cloudpulse-vault
+  labels:
+    app: ledger-backend-vault
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ledger-backend-vault
+  template:
+    metadata:
+      labels:
+        app: ledger-backend-vault
+    spec:
+      containers:
+        - name: vault-store
+          image: nginx:alpine
+          ports:
+            - containerPort: 80
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ledger-backend-service
+  namespace: cloudpulse-vault
+spec:
+  type: ClusterIP
+  ports:
+    - port: 80
+      targetPort: 80
+      protocol: TCP
+      name: http
+  selector:
+    app: ledger-backend-vault

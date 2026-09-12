@@ -1,0 +1,6 @@
+
+# Terraform artifacts
+.terraform/
+*.tfstate
+*.tfstate.backup
+*.tfvars

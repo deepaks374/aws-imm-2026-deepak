@@ -1,0 +1,196 @@
+name: Code-to-Cloud CNAPP Security Pipeline
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+permissions:
+  id-token: write   # Required for AWS OIDC authentication
+  contents: read    # Required for code checkout
+  security-events: write
+
+env:
+  AWS_REGION: ap-south-1
+  ECR_REPOSITORY: cloudpulse-telemetry-engine
+  EKS_CLUSTER_NAME: cloudpulse-cnapp-eks
+  DEPLOYMENT_NAMESPACE: cloudpulse-core
+
+jobs:
+  # ============================================================================
+  # STAGE 1: Code Verification & Unit Testing
+  # ============================================================================
+  test-and-lint:
+    name: "01. Application Unit Testing"
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: src
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v3
+
+      - name: Set up Python 3.8
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.8"
+
+      - name: Install Test Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Execute Unit Test Suite
+        run: |
+          pytest test_app.py -v
+
+  # ============================================================================
+  # STAGE 2: Source Code Security (SAST, Secrets, IaC Scanning)
+  # Identifies hardcoded keys, command injection, and IaC/K8s misconfigurations
+  # ============================================================================
+  cnapp-source-scan:
+    name: "02. CNAPP Source & IaC Security Scan"
+    needs: [test-and-lint]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v3
+
+      - name: "Cortex SAST & Secret Scanner (Trivy Filesystem Mode)"
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          severity: 'CRITICAL,HIGH,MEDIUM'
+          exit-code: '0' # Non-blocking to allow full demonstration
+          format: 'table'
+
+      - name: "Cortex IaC Posture Scanner (Checkov IaC & Manifests)"
+        uses: bridgecrewio/checkov-action@master
+        with:
+          framework: terraform,kubernetes
+          directory: '.'
+          soft_fail: true # Highlights misconfigurations in PR
+
+  # ============================================================================
+  # STAGE 3: Container Build, Image Scanning, & Artifact Registry Push
+  # Builds Docker image, scans image layers, and pushes image to Amazon ECR
+  # ============================================================================
+  build-and-image-scan:
+    name: "03. Container Build, Scan & ECR Push"
+    needs: [cnapp-source-scan]
+    runs-on: ubuntu-latest
+    outputs:
+      image_tag: ${{ steps.set-tag.outputs.image_tag }}
+      ecr_registry: ${{ steps.login-ecr.outputs.registry }}
+      full_image: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ steps.set-tag.outputs.image_tag }}
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v3
+
+      - name: Compute Image Tag
+        id: set-tag
+        run: |
+          IMAGE_TAG="${{ github.sha }}"
+          echo "image_tag=${IMAGE_TAG}" >> $GITHUB_OUTPUT
+
+      - name: Configure AWS Credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Log in to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+
+      - name: Build Container Image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ steps.set-tag.outputs.image_tag }}
+        run: |
+          FULL_IMAGE="${ECR_REGISTRY}/${{ env.ECR_REPOSITORY }}:${IMAGE_TAG}"
+          echo "Building container image: ${FULL_IMAGE}"
+          docker build -t "${FULL_IMAGE}" -t "${ECR_REGISTRY}/${{ env.ECR_REPOSITORY }}:latest" -f src/Dockerfile src/
+
+      # ------------------------------------------------------------------------
+      # Container Image Security Scanner:
+      # Evaluates image layers for CVEs, embedded malware (EICAR), and misconfigurations
+      # ------------------------------------------------------------------------
+      - name: "CNAPP Image Vulnerability & Malware Scan"
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: "${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ steps.set-tag.outputs.image_tag }}"
+          format: 'table'
+          severity: 'CRITICAL,HIGH,MEDIUM'
+          exit-code: '0'
+
+      - name: Push Container Image to Amazon ECR
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ steps.set-tag.outputs.image_tag }}
+        run: |
+          echo "Pushing ${ECR_REGISTRY}/${{ env.ECR_REPOSITORY }}:${IMAGE_TAG} to ECR..."
+          docker push "${ECR_REGISTRY}/${{ env.ECR_REPOSITORY }}:${IMAGE_TAG}"
+          docker push "${ECR_REGISTRY}/${{ env.ECR_REPOSITORY }}:latest"
+
+  # ============================================================================
+  # STAGE 4: Direct Kubernetes Deployment to EKS
+  # Authenticates to EKS cluster, dynamically injects ECR image tag, and applies manifests
+  # ============================================================================
+  deploy-to-eks:
+    name: "04. Deploy Directly to EKS Cluster"
+    needs: [build-and-image-scan]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v3
+
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: 'v1.32.0'
+
+      - name: Configure AWS Credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Connect to EKS Cluster
+        run: |
+          echo "[*] Updating kubeconfig for EKS cluster ${{ env.EKS_CLUSTER_NAME }} in ${{ env.AWS_REGION }}..."
+          aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name ${{ env.EKS_CLUSTER_NAME }}
+          kubectl cluster-info
+
+      - name: Prepare Dynamic Kubernetes Manifests with ECR Image
+        env:
+          FULL_IMAGE: ${{ needs.build-and-image-scan.outputs.full_image }}
+        run: |
+          echo "[*] Injecting target ECR image into deployment manifest: ${FULL_IMAGE}"
+          sed -i "s|image: REPLACED_BY_CI_CD_PIPELINE|image: ${FULL_IMAGE}|g" k8s/deployment.yaml
+          cat k8s/deployment.yaml | grep -E "image:|name:"
+
+      - name: Apply Kubernetes Manifests to EKS Cluster
+        run: |
+          echo "[*] Deploying namespaces, services, and RBAC configs..."
+          kubectl apply -f k8s/service.yaml
+
+          echo "[*] Deploying workload deployment to EKS..."
+          kubectl apply -f k8s/deployment.yaml
+
+          echo "[*] Waiting for deployment rollout to complete..."
+          kubectl rollout status deployment/cloudpulse-telemetry-engine -n ${{ env.DEPLOYMENT_NAMESPACE }} --timeout=180s
+
+      - name: Verify Live Deployment Status in EKS
+        run: |
+          echo "=================================================================="
+          echo "   Live Deployment Summary on EKS (${{ env.EKS_CLUSTER_NAME }})   "
+          echo "=================================================================="
+          kubectl get namespaces
+          echo ""
+          kubectl get pods,svc,sa -n ${{ env.DEPLOYMENT_NAMESPACE }} -o wide
+          echo ""
+          kubectl get pods,svc -n cloudpulse-vault -o wide
