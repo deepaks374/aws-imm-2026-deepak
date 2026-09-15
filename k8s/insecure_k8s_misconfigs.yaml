@@ -1,0 +1,50 @@
+# ==============================================================================
+# Additional Kubernetes Security Misconfigurations
+# Detected by: Cortex KSPM (Kubernetes Security Posture Management) & Admission
+# ==============================================================================
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: insecure-diagnostic-probe
+  namespace: cloudpulse-core
+  labels:
+    app: insecure-diagnostic-probe
+    tier: diagnostics
+spec:
+  # Misconfiguration 1: Sharing host network namespace
+  hostNetwork: true
+  # Misconfiguration 2: Sharing host IPC namespace
+  hostIPC: true
+  # Misconfiguration 3: Insecure hostPID
+  hostPID: true
+
+  containers:
+    - name: probe-worker
+      image: busybox:latest
+      command: ["sleep", "36000"]
+
+      # Misconfiguration 4: Privileged container execution with root user
+      securityContext:
+        privileged: true
+        runAsUser: 0
+        allowPrivilegeEscalation: true
+        capabilities:
+          add:
+            - ALL
+
+      # Misconfiguration 5: Docker socket mount inside container (Docker socket escape vector)
+      volumeMounts:
+        - name: docker-socket
+          mountPath: /var/run/docker.sock
+        - name: host-etc
+          mountPath: /etc-host
+          readOnly: false
+
+  volumes:
+    - name: docker-socket
+      hostPath:
+        path: /var/run/docker.sock
+    - name: host-etc
+      hostPath:
+        path: /etc

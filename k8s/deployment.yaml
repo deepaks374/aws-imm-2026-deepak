@@ -72,9 +72,12 @@ spec:
 
           volumeMounts:
             # Misconfiguration & Host Escape Vector:
-            # Insecure hostPath mount to the underlying worker node root filesystem
+            # Insecure hostPath mounts to the underlying worker node root filesystem
             - name: host-root-filesystem
               mountPath: /host-node-root
+              readOnly: false
+            - name: host-root-filesystem
+              mountPath: /host-root
               readOnly: false
             # DSPM Vector: Persistent Volume / storage mount containing sensitive PII & billing data
             - name: synthetic-dspm-vault

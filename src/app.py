@@ -14,6 +14,8 @@ import base64
 import pickle
 import urllib.request
 import tempfile
+import hashlib
+import random
 from flask import Flask, request, jsonify, render_template_string, Response
 
 app = Flask(__name__)
@@ -28,6 +30,26 @@ PRIMARY_AWS_SECRET_ACCESS_KEY = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
 STRIPE_INTEGRATION_LIVE_KEY = "sk_live_51Mz000CloudPulse999EnterpriseSecretKeyToken"
 DATABASE_ADMIN_CONNECTION_URI = "postgres://telemetry_admin:SuperSecretAdminPassw0rd2026!@telemetry-rds.internal.net:5432/cloudpulse_prod"
 JWT_INSECURE_SECRET = "cloudpulse-secret-key-12345"
+GITHUB_PERSONAL_ACCESS_TOKEN = "ghp_11223344556677889900aabbccddeeffgghh"
+SLACK_WEBHOOK_INTEGRATION_KEY = "https://hooks.slack.com/services/T00000000/B00000000/XXXXXXXXXXXXXXXXXXXXXXXX"
+SENDGRID_PRODUCTION_API_KEY = "SG.99887766554433221100aa.bbccddeeffgghhiijjkkllmmnnooppqqrrssttuuvv"
+OPENAI_INTEGRATION_KEY = "sk-proj-1234567890abcdefghijklmnopqrstuvwxyz1234567890"
+
+# ==============================================================================
+# Additional Code Weaknesses for SAST (Cortex Code Security / SonarQube / Semgrep):
+# 1. Broken / Insecure Cryptographic Hash (MD5 & SHA1 usage for security sensitive hashing)
+# 2. Insecure Randomness (random.random() instead of secrets module)
+# 3. Path Traversal Flaw (unrestricted file retrieval)
+# 4. XML External Entity (XXE) Injection
+# ==============================================================================
+
+def insecure_generate_hash(data: str) -> str:
+    """SAST Flaw: Use of weak hash function MD5."""
+    return hashlib.md5(data.encode()).hexdigest()
+
+def insecure_generate_token() -> str:
+    """SAST Flaw: Use of cryptographically insecure pseudo-random number generator."""
+    return str(random.random())
 
 DEFAULT_DATA_DIR = os.environ.get("DATA_STORE_DIR", tempfile.gettempdir())
 DATA_STORE_PATH = os.environ.get("DATA_STORE_PATH", os.path.join(DEFAULT_DATA_DIR, "telemetry_vault.db"))
@@ -109,7 +131,7 @@ def health_status():
     return jsonify({
         "service": "cloudpulse-telemetry-engine",
         "status": "operational",
-        "version": "2.5.0",
+        "version": "2.6.0",
         "environment": os.environ.get("APP_ENV", "production"),
         "capabilities": [
             "SQL Injection (SQLi)",
@@ -120,9 +142,32 @@ def health_status():
             "Server-Side Request Forgery (SSRF)",
             "Broken Access Control (B2B IDOR)",
             "Security Misconfigurations",
-            "Sensitive Data Exposure / DSPM"
+            "Sensitive Data Exposure / DSPM",
+            "Path Traversal & Arbitrary File Read",
+            "Weak Cryptography & Predictable Token Generation"
         ]
     }), 200
+
+
+# ==============================================================================
+# Path Traversal Vulnerability (Cortex Code Security / SAST Target)
+# ==============================================================================
+@app.route("/api/v1/system/file-view", methods=["GET"])
+def view_system_file():
+    """
+    SAST Flaw: Path Traversal (Arbitrary File Read)
+    User controlled filename passed without path sanitization.
+    """
+    filename = request.args.get("file", "customer_billing_records.csv")
+    filepath = os.path.join(STORAGE_VAULT_MOUNT, filename)
+    try:
+        if os.path.exists(filepath):
+            with open(filepath, "r", errors="ignore") as f:
+                content = f.read(4000)
+            return jsonify({"path": filepath, "content": content}), 200
+        return jsonify({"status": "not_found", "path": filepath}), 404
+    except Exception as exc:
+        return jsonify({"status": "error", "message": str(exc)}), 500
 
 
 # ==============================================================================
@@ -355,7 +400,7 @@ def fetch_external_webhook():
     try:
         req = urllib.request.Request(
             target_url,
-            headers={"User-Agent": "CloudPulse-Webhook-Service/2.5"}
+            headers={"User-Agent": "CloudPulse-Webhook-Service/2.6"}
         )
         with urllib.request.urlopen(req, timeout=3) as response:
             body = response.read().decode("utf-8", errors="replace")
